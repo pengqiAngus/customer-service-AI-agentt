@@ -4,7 +4,7 @@ import logging
 import sqlalchemy
 from typing import Dict, List, Any, Optional, Tuple
 from sqlalchemy import create_engine, text, inspect
-from langchain_openai import ChatOpenAI
+from transformers import AutoTokenizer, AutoModelForCausalLM, pipeline
 from langchain.prompts import PromptTemplate
 from langchain.schema import BaseOutputParser
 
@@ -14,10 +14,10 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 class SQLOutputParser(BaseOutputParser):
-    """Parse SQL query from LLM output"""
+    """从LLM输出解析SQL查询"""
     
     def parse(self, text: str) -> str:
-        """Extract SQL query from text"""
+        """从文本中提取SQL查询"""
         # Remove markdown code blocks if present
         if "```sql" in text:
             start = text.find("```sql") + 6
@@ -39,12 +39,15 @@ class SQLOutputParser(BaseOutputParser):
         return sql
 
 class Text2SQL:
-    """Text to SQL conversion for customer service queries"""
+    """客户服务问题的文本转SQL"""
     
     def __init__(self):
         self.enabled = config.ENABLE_TEXT2SQL
         self.engine = None
         self.llm = None
+        self.local_tokenizer = None
+        self.local_model = None
+        self.local_pipe = None
         self.schema_info = {}
         self.sql_parser = SQLOutputParser()
         
@@ -52,7 +55,7 @@ class Text2SQL:
             self._initialize_components()
     
     def _initialize_components(self):
-        """Initialize database connection and LLM"""
+        """初始化数据库连接和LLM"""
         try:
             # Initialize database connection
             if config.DATABASE_URL:
@@ -64,24 +67,30 @@ class Text2SQL:
                 self.enabled = False
                 return
             
-            # Initialize LLM for SQL generation
-            if config.OPENAI_API_KEY:
-                self.llm = ChatOpenAI(
-                    api_key=config.OPENAI_API_KEY,
-                    base_url=config.OPENAI_BASE_URL,
-                    model="gpt-3.5-turbo",
-                    temperature=0.1  # Low temperature for more consistent SQL generation
+            # 加载本地模型用于SQL生成
+            try:
+                logger.info(f"Loading local model for Text2SQL: {config.MODEL_NAME}")
+                self.local_tokenizer = AutoTokenizer.from_pretrained(config.MODEL_NAME)
+                self.local_model = AutoModelForCausalLM.from_pretrained(config.MODEL_NAME)
+                self.local_pipe = pipeline(
+                    "text-generation",
+                    model=self.local_model,
+                    tokenizer=self.local_tokenizer,
+                    max_new_tokens=256,
+                    temperature=0.1,
+                    device=0 if hasattr(self.local_model, 'cuda') and self.local_model.device.type == 'cuda' else -1
                 )
-                logger.info("OpenAI LLM initialized for SQL generation")
-            else:
-                logger.warning("OpenAI API key not configured. Using fallback SQL generation.")
+                logger.info("本地LLM加载完成 (Text2SQL)")
+            except Exception as e:
+                logger.error(f"本地模型加载失败 (Text2SQL): {e}")
+                self.local_pipe = None
             
         except Exception as e:
             logger.error(f"Error initializing Text2SQL components: {e}")
             self.enabled = False
     
     def _load_schema_info(self):
-        """Load database schema information"""
+        """加载数据库结构信息"""
         try:
             # Try to load from config file first
             if os.path.exists(config.SQL_TABLES_INFO_PATH):
@@ -98,7 +107,7 @@ class Text2SQL:
             self._create_sample_schema_info()
     
     def _inspect_database_schema(self):
-        """Inspect database to get schema information"""
+        """检查数据库以获取结构信息"""
         try:
             if not self.engine:
                 return
@@ -114,7 +123,7 @@ class Text2SQL:
                 indexes = inspector.get_indexes(table_name)
                 
                 table_info = {
-                    "description": f"Table: {table_name}",
+                    "description": f"表: {table_name}",
                     "columns": [],
                     "foreign_keys": foreign_keys,
                     "indexes": indexes
@@ -126,7 +135,7 @@ class Text2SQL:
                         "type": str(column["type"]),
                         "nullable": column["nullable"],
                         "default": column.get("default"),
-                        "description": f"Column {column['name']} of type {column['type']}"
+                        "description": f"列 {column['name']} 类型为 {column['type']}"
                     }
                     table_info["columns"].append(column_info)
                 
@@ -145,7 +154,7 @@ class Text2SQL:
             logger.error(f"Error inspecting database schema: {e}")
     
     def _create_sample_schema_info(self):
-        """Create sample schema information for demonstration"""
+        """创建示例结构信息用于演示"""
         sample_schema = {
             "tables": {
                 "customers": {
@@ -207,7 +216,7 @@ class Text2SQL:
             logger.error(f"Error saving sample schema: {e}")
     
     def _build_schema_prompt(self) -> str:
-        """Build schema information for prompt"""
+        """构建用于提示的结构信息"""
         if not self.schema_info or "tables" not in self.schema_info:
             return "No schema information available."
         
@@ -226,12 +235,12 @@ class Text2SQL:
         return schema_text
     
     def generate_sql(self, question: str) -> Tuple[Optional[str], Optional[str]]:
-        """Generate SQL query from natural language question"""
+        """根据自然语言问题生成SQL查询"""
         try:
             if not self.enabled:
                 return None, "Text2SQL功能未启用"
             
-            if not self.llm:
+            if not self.local_pipe:
                 return self._fallback_sql_generation(question)
             
             schema_prompt = self._build_schema_prompt()
@@ -261,8 +270,9 @@ SQL查询:"""
             )
             
             # Get response from LLM
-            response = self.llm.invoke(prompt)
-            sql_query = self.sql_parser.parse(response.content)
+            result = self.local_pipe(prompt, max_new_tokens=256, temperature=0.1)
+            sql_text = result[0]["generated_text"][len(prompt):].strip()
+            sql_query = self.sql_parser.parse(sql_text)
             
             # Validate SQL
             if self._validate_sql(sql_query):
@@ -275,7 +285,7 @@ SQL查询:"""
             return None, f"SQL生成失败: {str(e)}"
     
     def _fallback_sql_generation(self, question: str) -> Tuple[Optional[str], Optional[str]]:
-        """Fallback SQL generation without LLM"""
+        """无LLM时的兜底SQL生成"""
         # Simple pattern matching for common queries
         question_lower = question.lower()
         
@@ -290,7 +300,7 @@ SQL查询:"""
             return None, "无法识别查询意图，请使用更具体的问题"
     
     def _validate_sql(self, sql_query: str) -> bool:
-        """Validate SQL query syntax"""
+        """校验SQL查询语法"""
         try:
             if not sql_query or sql_query.strip() == "":
                 return False
@@ -318,7 +328,7 @@ SQL查询:"""
             return False
     
     def execute_sql(self, sql_query: str) -> Tuple[Optional[List[Dict]], Optional[str]]:
-        """Execute SQL query and return results"""
+        """执行SQL查询并返回结果"""
         try:
             if not self.enabled or not self.engine:
                 return None, "数据库连接未配置"
@@ -355,7 +365,7 @@ SQL查询:"""
             return None, error_msg
     
     def process_question(self, question: str) -> Dict[str, Any]:
-        """Process natural language question and return SQL results"""
+        """处理自然语言问题并返回SQL结果"""
         try:
             if not self.enabled:
                 return {
@@ -405,7 +415,7 @@ SQL查询:"""
             }
     
     def get_sample_questions(self) -> List[str]:
-        """Get sample questions for testing"""
+        """获取用于测试的示例问题"""
         return [
             "查询所有客户的信息",
             "显示待处理的订单",
@@ -418,11 +428,11 @@ SQL查询:"""
         ]
     
     def get_status(self) -> Dict[str, Any]:
-        """Get Text2SQL service status"""
+        """获取Text2SQL服务状态"""
         return {
             "enabled": self.enabled,
             "database_connected": self.engine is not None,
-            "llm_available": self.llm is not None,
+            "llm_available": self.local_pipe is not None,
             "schema_loaded": bool(self.schema_info),
             "table_count": len(self.schema_info.get("tables", {}))
         }

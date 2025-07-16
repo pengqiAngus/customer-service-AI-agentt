@@ -4,7 +4,7 @@ from dataclasses import dataclass
 import json
 
 from langgraph.graph import StateGraph, END
-from langchain_openai import ChatOpenAI
+from transformers import AutoTokenizer, AutoModelForCausalLM, pipeline
 from langchain.prompts import PromptTemplate
 from langchain.schema import BaseMessage, HumanMessage, AIMessage
 
@@ -18,7 +18,7 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class AgentState:
-    """State management for AI Agent"""
+    """AI智能体的状态管理"""
     session_id: str
     user_input: str
     conversation_history: List[Dict[str, Any]]
@@ -41,32 +41,41 @@ class AgentState:
         }
 
 class CustomerServiceAgent:
-    """AI Customer Service Agent with LangGraph workflow"""
+    """基于LangGraph工作流的AI客户服务智能体"""
     
     def __init__(self):
         self.memory = ConversationMemory()
         self.knowledge_base = KnowledgeBase()
         self.text2sql = Text2SQL()
         self.llm = None
+        self.local_tokenizer = None
+        self.local_model = None
+        self.local_pipe = None
         self.workflow = None
         
         self._initialize_components()
         self._build_workflow()
     
     def _initialize_components(self):
-        """Initialize LLM and other components"""
+        """初始化LLM和其他组件"""
         try:
-            if config.OPENAI_API_KEY:
-                self.llm = ChatOpenAI(
-                    api_key=config.OPENAI_API_KEY,
-                    base_url=config.OPENAI_BASE_URL,
-                    model="gpt-3.5-turbo",
+            # 加载本地模型
+            try:
+                logger.info(f"Loading local model: {config.MODEL_NAME}")
+                self.local_tokenizer = AutoTokenizer.from_pretrained(config.MODEL_NAME,trust_remote_code=True)
+                self.local_model = AutoModelForCausalLM.from_pretrained(config.MODEL_NAME,trust_remote_code=True)
+                self.local_pipe = pipeline(
+                    "text-generation",
+                    model=self.local_model,
+                    tokenizer=self.local_tokenizer,
+                    max_new_tokens=config.MAX_TOKENS,
                     temperature=config.AGENT_TEMPERATURE,
-                    max_tokens=config.MAX_TOKENS
+                    device=0 if hasattr(self.local_model, 'cuda') and self.local_model.device.type == 'cuda' else -1
                 )
-                logger.info("LLM initialized for agent workflow")
-            else:
-                logger.warning("OpenAI API key not configured. Agent will use fallback responses.")
+                logger.info("本地LLM加载完成")
+            except Exception as e:
+                logger.error(f"本地模型加载失败: {e}")
+                self.local_pipe = None
             
             # Initialize knowledge base index
             if self.knowledge_base.vector_store.count() == 0:
@@ -77,7 +86,7 @@ class CustomerServiceAgent:
             logger.error(f"Error initializing agent components: {e}")
     
     def _build_workflow(self):
-        """Build LangGraph workflow"""
+        """构建LangGraph工作流"""
         try:
             # Define workflow graph
             workflow = StateGraph(AgentState)
@@ -118,7 +127,7 @@ class CustomerServiceAgent:
             raise
     
     def _load_memory_node(self, state: AgentState) -> AgentState:
-        """Load conversation memory"""
+        """加载对话记忆"""
         try:
             # Get conversation history
             history = self.memory.get_conversation_history(state.session_id)
@@ -137,7 +146,7 @@ class CustomerServiceAgent:
             return state
     
     def _analyze_intent_node(self, state: AgentState) -> AgentState:
-        """Analyze user intent"""
+        """分析用户意图"""
         try:
             user_input = state.user_input.lower()
             metadata = state.metadata
@@ -174,7 +183,7 @@ class CustomerServiceAgent:
             return state
     
     def _retrieve_knowledge_node(self, state: AgentState) -> AgentState:
-        """Retrieve relevant knowledge from RAG"""
+        """从RAG检索相关知识"""
         try:
             # Get relevant context from knowledge base
             context = self.knowledge_base.get_relevant_context(
@@ -192,12 +201,12 @@ class CustomerServiceAgent:
             return state
     
     def _should_execute_sql(self, state: AgentState) -> str:
-        """Determine if SQL execution is needed"""
+        """判断是否需要执行SQL"""
         needs_sql = state.metadata.get("needs_sql", False)
         return "execute_sql" if needs_sql else "generate_response"
     
     def _execute_sql_node(self, state: AgentState) -> AgentState:
-        """Execute SQL query if needed"""
+        """如需则执行SQL查询"""
         try:
             if not config.ENABLE_TEXT2SQL:
                 state.sql_result = None
@@ -221,9 +230,9 @@ class CustomerServiceAgent:
             return state
     
     def _generate_response_node(self, state: AgentState) -> AgentState:
-        """Generate final response"""
+        """生成最终回复"""
         try:
-            if self.llm:
+            if self.local_pipe:
                 response = self._generate_llm_response(state)
             else:
                 response = self._generate_fallback_response(state)
@@ -239,70 +248,45 @@ class CustomerServiceAgent:
             return state
     
     def _generate_llm_response(self, state: AgentState) -> str:
-        """Generate response using LLM"""
+        """使用LLM生成回复"""
         try:
             # Build prompt context
             prompt_parts = []
-            
-            # System message
-            system_prompt = """你是一个专业的客户服务AI助手。请根据提供的上下文信息为用户提供准确、友好的回答。
-
-回答要求：
-1. 语言友好、专业
-2. 回答准确、有帮助
-3. 如果有数据查询结果，请清晰地呈现
-4. 保持一致的客服语调"""
-            
+            system_prompt = "你是一个专业的客户服务AI助手。请根据提供的上下文信息为用户提供准确、友好的回答。\n\n回答要求：\n1. 语言友好、专业\n2. 回答准确、有帮助\n3. 如果有数据查询结果，请清晰地呈现\n4. 保持一致的客服语调"
             prompt_parts.append(f"系统提示: {system_prompt}")
-            
-            # Add conversation context
             if state.memory_context:
                 prompt_parts.append(f"对话历史:\n{state.memory_context}")
-            
-            # Add knowledge base context
             if state.rag_context:
                 prompt_parts.append(f"相关知识:\n{state.rag_context}")
-            
-            # Add SQL results if available
             if state.sql_result and state.sql_result.get("success"):
                 data = state.sql_result.get("data", [])
                 if data:
                     sql_query = state.sql_result.get("sql_query", "")
                     prompt_parts.append(f"数据库查询结果 (SQL: {sql_query}):")
-                    
-                    # Format data for presentation
                     if len(data) <= 10:
-                        # Show all data if small
                         formatted_data = json.dumps(data, ensure_ascii=False, indent=2)
                     else:
-                        # Show summary if large
                         formatted_data = f"查询返回 {len(data)} 条记录，前3条如下：\n"
                         formatted_data += json.dumps(data[:3], ensure_ascii=False, indent=2)
-                    
                     prompt_parts.append(formatted_data)
             elif state.sql_result and not state.sql_result.get("success"):
                 error = state.sql_result.get("error", "")
                 prompt_parts.append(f"数据查询失败: {error}")
-            
-            # Add user question
             prompt_parts.append(f"用户问题: {state.user_input}")
             prompt_parts.append("请基于以上信息回答用户问题:")
-            
-            # Create prompt
             prompt = "\n\n".join(prompt_parts)
-            
-            # Generate response
-            messages = [HumanMessage(content=prompt)]
-            response = self.llm.invoke(messages)
-            
-            return response.content.strip()
-            
+            if self.local_pipe:
+                result = self.local_pipe(prompt, max_new_tokens=config.MAX_TOKENS, temperature=config.AGENT_TEMPERATURE)
+                return result[0]["generated_text"][len(prompt):].strip()
+            else:
+                logger.error("本地模型未正确加载，无法生成回复。")
+                return self._generate_fallback_response(state)
         except Exception as e:
             logger.error(f"Error generating LLM response: {e}")
             return self._generate_fallback_response(state)
     
     def _generate_fallback_response(self, state: AgentState) -> str:
-        """Generate fallback response without LLM"""
+        """无LLM时生成兜底回复"""
         user_input = state.user_input.lower()
         
         # Simple pattern matching responses
@@ -330,7 +314,7 @@ class CustomerServiceAgent:
                 return "感谢您的咨询。为了更好地帮助您，请提供更具体的问题描述或联系我们的人工客服。"
     
     def _save_memory_node(self, state: AgentState) -> AgentState:
-        """Save conversation to memory"""
+        """保存对话到记忆"""
         try:
             # Save user message
             self.memory.add_message(
@@ -363,7 +347,7 @@ class CustomerServiceAgent:
             return state
     
     def process_message(self, session_id: str, user_input: str) -> Dict[str, Any]:
-        """Process user message through the workflow"""
+        """通过工作流处理用户消息"""
         try:
             # Create initial state
             initial_state = AgentState(
@@ -403,7 +387,7 @@ class CustomerServiceAgent:
             }
     
     def get_session_info(self, session_id: str) -> Dict[str, Any]:
-        """Get session information"""
+        """获取会话信息"""
         try:
             return self.memory.get_session_info(session_id)
         except Exception as e:
@@ -411,7 +395,7 @@ class CustomerServiceAgent:
             return {"error": str(e)}
     
     def clear_session(self, session_id: str) -> bool:
-        """Clear session memory"""
+        """清除会话记忆"""
         try:
             self.memory.clear_conversation(session_id)
             return True
@@ -420,7 +404,7 @@ class CustomerServiceAgent:
             return False
     
     def get_system_status(self) -> Dict[str, Any]:
-        """Get system status"""
+        """获取系统状态"""
         try:
             return {
                 "memory_available": self.memory.redis_client is not None,
@@ -437,13 +421,13 @@ class CustomerServiceAgent:
 
 # Function calling integration
 class AgentFunctions:
-    """Function calling integration for the agent"""
+    """Agent的函数调用集成"""
     
     def __init__(self, agent: CustomerServiceAgent):
         self.agent = agent
     
     def search_knowledge_base(self, query: str, top_k: int = 5) -> Dict[str, Any]:
-        """Search knowledge base function"""
+        """知识库检索函数"""
         try:
             results = self.agent.knowledge_base.search(query, top_k)
             return {
@@ -459,7 +443,7 @@ class AgentFunctions:
             }
     
     def execute_database_query(self, question: str) -> Dict[str, Any]:
-        """Execute database query function"""
+        """数据库查询函数"""
         try:
             result = self.agent.text2sql.process_question(question)
             return result
@@ -471,7 +455,7 @@ class AgentFunctions:
             }
     
     def get_conversation_summary(self, session_id: str) -> Dict[str, Any]:
-        """Get conversation summary function"""
+        """获取会话摘要函数"""
         try:
             summary = self.agent.memory.get_conversation_summary(session_id)
             return {

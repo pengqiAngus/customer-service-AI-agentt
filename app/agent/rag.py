@@ -21,7 +21,7 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 class KnowledgeBase:
-    """RAG Knowledge Base for customer service documents"""
+    """客户服务文档的RAG知识库"""
     
     def __init__(self):
         self.embedding_model = None
@@ -34,7 +34,7 @@ class KnowledgeBase:
         self._initialize_components()
     
     def _initialize_components(self):
-        """Initialize embedding model and vector store"""
+        """初始化嵌入模型和向量存储"""
         try:
             # Initialize embedding model
             logger.info(f"Loading embedding model: {config.EMBEDDING_MODEL}")
@@ -60,7 +60,7 @@ class KnowledgeBase:
             raise
     
     def _create_sample_knowledge_files(self):
-        """Create sample knowledge files if none exist"""
+        """如无则创建示例知识文件"""
         try:
             knowledge_path = Path(config.KNOWLEDGE_BASE_PATH)
             knowledge_path.mkdir(exist_ok=True)
@@ -198,7 +198,7 @@ A: 正品验证方法：
             logger.error(f"Error creating sample knowledge files: {e}")
     
     def load_documents(self, file_path: Optional[str] = None) -> List[Document]:
-        """Load documents from knowledge base"""
+        """从知识库加载文档"""
         documents = []
         
         try:
@@ -223,7 +223,7 @@ A: 正品验证方法：
             return []
     
     def _load_single_file(self, file_path: str) -> List[Document]:
-        """Load a single file based on its extension"""
+        """根据扩展名加载单个文件"""
         try:
             file_ext = Path(file_path).suffix.lower()
             
@@ -255,7 +255,7 @@ A: 正品验证方法：
             return []
     
     def build_index(self, rebuild: bool = False) -> bool:
-        """Build or rebuild the vector index"""
+        """构建或重建向量索引"""
         try:
             # Check if index already exists
             if not rebuild and self.vector_store.count() > 0:
@@ -314,7 +314,7 @@ A: 正品验证方法：
             return False
     
     def search(self, query: str, top_k: int = 5) -> List[Dict[str, Any]]:
-        """Search for relevant documents"""
+        """检索相关文档"""
         try:
             if self.vector_store.count() == 0:
                 logger.warning("Vector store is empty. Building index...")
@@ -354,7 +354,7 @@ A: 正品验证方法：
             return []
     
     def get_relevant_context(self, query: str, max_context_length: int = 2000) -> str:
-        """Get relevant context for a query"""
+        """获取查询的相关上下文"""
         try:
             search_results = self.search(query, top_k=5)
             
@@ -384,7 +384,7 @@ A: 正品验证方法：
             return ""
     
     def add_document(self, content: str, metadata: Dict[str, Any]) -> bool:
-        """Add a new document to the knowledge base"""
+        """向知识库添加新文档"""
         try:
             # Create document
             doc = Document(page_content=content, metadata=metadata)
@@ -415,7 +415,7 @@ A: 正品验证方法：
             return False
     
     def get_stats(self) -> Dict[str, Any]:
-        """Get knowledge base statistics"""
+        """获取知识库统计信息"""
         try:
             total_documents = self.vector_store.count()
             

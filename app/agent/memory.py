@@ -10,7 +10,7 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 class ConversationMemory:
-    """Conversation memory management using Redis"""
+    """使用 Redis 管理对话记忆"""
     
     def __init__(self):
         try:
@@ -29,11 +29,11 @@ class ConversationMemory:
             self._memory_store = {}  # Fallback in-memory store
     
     def _get_conversation_key(self, session_id: str) -> str:
-        """Generate Redis key for conversation"""
+        """生成 Redis 对话键名"""
         return f"conversation:{session_id}"
     
     def add_message(self, session_id: str, role: str, content: str, metadata: Optional[Dict] = None):
-        """Add a message to conversation history"""
+        """添加消息到对话历史"""
         try:
             message = {
                 "role": role,
@@ -69,7 +69,7 @@ class ConversationMemory:
             logger.error(f"Error adding message to memory: {e}")
     
     def get_conversation_history(self, session_id: str, limit: Optional[int] = None) -> List[Dict[str, Any]]:
-        """Retrieve conversation history for a session"""
+        """获取会话的对话历史"""
         try:
             if limit is None:
                 limit = config.MAX_CONVERSATION_HISTORY
@@ -93,7 +93,7 @@ class ConversationMemory:
             return []
     
     def get_recent_context(self, session_id: str, context_length: int = 5) -> str:
-        """Get recent conversation context as formatted string"""
+        """获取最近的对话上下文（格式化字符串）"""
         try:
             history = self.get_conversation_history(session_id, limit=context_length)
             
@@ -116,7 +116,7 @@ class ConversationMemory:
             return ""
     
     def clear_conversation(self, session_id: str):
-        """Clear conversation history for a session"""
+        """清除某会话的对话历史"""
         try:
             if self.redis_client:
                 key = self._get_conversation_key(session_id)
@@ -131,7 +131,7 @@ class ConversationMemory:
             logger.error(f"Error clearing conversation: {e}")
     
     def get_session_info(self, session_id: str) -> Dict[str, Any]:
-        """Get session information and statistics"""
+        """获取会话信息和统计"""
         try:
             history = self.get_conversation_history(session_id)
             
@@ -168,7 +168,7 @@ class ConversationMemory:
             }
     
     def search_conversations(self, session_id: str, query: str, limit: int = 5) -> List[Dict[str, Any]]:
-        """Search for messages containing specific keywords"""
+        """搜索包含关键词的消息"""
         try:
             history = self.get_conversation_history(session_id)
             
@@ -187,7 +187,7 @@ class ConversationMemory:
             return []
     
     def get_conversation_summary(self, session_id: str) -> Dict[str, Any]:
-        """Generate a summary of the conversation"""
+        """生成会话摘要"""
         try:
             history = self.get_conversation_history(session_id)
             
